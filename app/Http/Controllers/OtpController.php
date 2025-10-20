@@ -177,13 +177,13 @@ class OtpController extends Controller
         Auth::login($user);
         $sessionId = request()->input('session_id');
         $urls = Url::where('session_id', $sessionId)->get();
-         \Illuminate\Support\Facades\DB::transaction(function () use ($urls, $user) {
-        foreach ($urls as $url) {
-            $url->user_id = $user->id;
-            $url->session_id = null;
-            $url->save(); // triggers model events
-        }
-    });
+        \Illuminate\Support\Facades\DB::transaction(function () use ($urls, $user) {
+            foreach ($urls as $url) {
+                $url->user_id = $user->id;
+                $url->session_id = null;
+                $url->save(); // triggers model events
+            }
+        });
 
         // Return safe user info (omit sensitive fields)
         $safeUser = [
