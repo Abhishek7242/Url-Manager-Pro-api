@@ -6,6 +6,8 @@ use App\Models\Url;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
+
 
 class UrlController extends Controller
 {
@@ -56,9 +58,10 @@ class UrlController extends Controller
 
         return ['session_id' => $sessionId];
     }
+
     public function store(Request $request)
     {
-        $session_id = $request->query('session_id') ;
+        $session_id = $request->query('session_id');
         $authUser = $request->user();
 
         // ✅ Validate input
@@ -74,7 +77,7 @@ class UrlController extends Controller
 
         // ✅ Base data
         $data = $validated;
-        if(!$authUser) {       
+        if (!$authUser) {
             $data['session_id'] = $session_id;
         }
         $data['status'] = $data['status'] ?? 'active';
@@ -105,12 +108,20 @@ class UrlController extends Controller
         // ✅ Create the URL record
         $url = Url::create($data);
 
+        // 🧠 Clear cache for this user/session (so next getAll() is fresh)
+        $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+        Cache::flush(); // optional for global reset (not recommended for multi-user)
+        // Or safer selective clearing:
+        Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
+
         return response()->json([
             'message' => 'URL stored successfully',
             'data'    => $url,
             'user_id' => $authUser ? $authUser->id : null,
         ], 201);
     }
+
+
 
     public function edit(Request $request, $id)
     {
@@ -160,6 +171,10 @@ class UrlController extends Controller
         try {
             $url->update($data);
 
+            // 🧠 Clear cache for this user/session (so next getAll() fetches fresh data)
+            $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+            Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
+
             return response()->json([
                 'success' => true,
                 'message' => 'URL updated successfully',
@@ -167,7 +182,6 @@ class UrlController extends Controller
             ]);
         } catch (\Exception $e) {
             // Optionally log the error
-
             return response()->json([
                 'success' => false,
                 'message' => 'Could not update URL',
@@ -175,42 +189,51 @@ class UrlController extends Controller
         }
     }
 
+
     public function getAll(Request $request)
     {
         $user = $request->user();
         $status = $request->query('status');
         $tag = $request->query('tag');
 
-        $query = \App\Models\Url::query();
+        $cacheKey = 'urls_' . ($user ? 'user_' . $user->id : 'session_' . $request->query('session_id'))
+            . '_status_' . ($status ?? 'all')
+            . '_tag_' . ($tag ?? 'all');
 
-        // Scope by authenticated user or fallback to session_id
-        if ($user) {
-            $query->where('user_id', $user->id);
-        } elseif ($request->filled('session_id')) {
-            $query->where('session_id', $request->query('session_id'));
-        }
+        $urls = Cache::remember($cacheKey, now()->addMinutes(5), function () use ($user, $request, $status, $tag) {
+            $query = \App\Models\Url::query();
 
-        // Apply optional filters
-        if ($status) {
-            $query->where('status', $status);
-        }
+            // Scope by authenticated user or fallback to session_id
+            if ($user) {
+                $query->where('user_id', $user->id);
+            } elseif ($request->filled('session_id')) {
+                $query->where('session_id', $request->query('session_id'));
+            }
 
-        if ($tag) {
-            // when tags stored as JSON array
-            $query->whereJsonContains('tags', $tag);
-        }
+            // Apply optional filters
+            if ($status) {
+                $query->where('status', $status);
+            }
 
-        $urls = $query->orderBy('created_at', 'desc')->get();
+            if ($tag) {
+                // when tags stored as JSON array
+                $query->whereJsonContains('tags', $tag);
+            }
 
-        // Format timestamps
-        $urls->transform(function ($url) {
-            $url->formatted_created_at = $url->created_at
-                ? $url->created_at->format('M d, Y h:i A')
-                : null;
-            $url->formatted_updated_at = $url->updated_at
-                ? $url->updated_at->format('M d, Y')
-                : null;
-            return $url;
+            $urls = $query->orderBy('created_at', 'desc')->get();
+
+            // Format timestamps
+            $urls->transform(function ($url) {
+                $url->formatted_created_at = $url->created_at
+                    ? $url->created_at->format('M d, Y h:i A')
+                    : null;
+                $url->formatted_updated_at = $url->updated_at
+                    ? $url->updated_at->format('M d, Y')
+                    : null;
+                return $url;
+            });
+
+            return $urls;
         });
 
         // Build response consistently and safely
@@ -223,10 +246,9 @@ class UrlController extends Controller
         ];
 
         if ($user) {
-            // include useful user info (avoid accessing ->id when $user might be null)
             $response['user'] = [
-                'id'   => $user->id,
-                'name' => $user->name ?? null,
+                'id'    => $user->id,
+                'name'  => $user->name ?? null,
                 'email' => $user->email ?? null,
             ];
         } else {
@@ -235,6 +257,7 @@ class UrlController extends Controller
 
         return response()->json($response, 200);
     }
+
     public function getById(Request $request, $id)
     {
         $user = $request->user();
@@ -267,9 +290,9 @@ class UrlController extends Controller
             ? $url->updated_at->format('M d, Y')
             : null;
 
-      
 
-     
+
+
 
         return response()->json($url, 200);
     }
@@ -305,6 +328,7 @@ class UrlController extends Controller
         ]);
     }
 
+
     public function destroy(Request $request, $id)
     {
         $session_id = $request->query('session_id');
@@ -324,7 +348,7 @@ class UrlController extends Controller
         }
 
         // If not found, return 404
-        if (! $url) {
+        if (!$url) {
             return response()->json([
                 'success' => false,
                 'message' => 'URL not found',
@@ -334,20 +358,25 @@ class UrlController extends Controller
         try {
             $url->delete();
 
+            // 🧠 Clear cache for this user/session (so getAll() will return fresh data)
+            $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+            Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
+
             return response()->json([
                 'success' => true,
                 'message' => 'URL deleted successfully',
-                'id' => $id,
+                'id'      => $id,
             ]);
         } catch (\Exception $e) {
             // Log the error for debugging
-
             return response()->json([
                 'success' => false,
                 'message' => 'Could not delete URL',
             ], 500);
         }
     }
+
+
 
     public function updateClickCount(Request $request, $id)
     {
@@ -366,7 +395,7 @@ class UrlController extends Controller
         }
 
         // ❌ If not found
-        if (! $url) {
+        if (!$url) {
             return response()->json([
                 'success' => false,
                 'message' => 'URL not found',
@@ -376,6 +405,10 @@ class UrlController extends Controller
         try {
             // ✅ Increment the click count safely
             $url->increment('url_clicks');
+
+            // 🧠 Clear cache for this user/session to refresh updated click count
+            $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+            Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
 
             return response()->json([
                 'success' => true,
@@ -387,13 +420,14 @@ class UrlController extends Controller
             ]);
         } catch (\Exception $e) {
             // Log error for debugging
-
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to update click count',
             ], 500);
         }
     }
+
+
 
 
     public function removeDuplicated(Request $request, $id)
@@ -433,6 +467,10 @@ class UrlController extends Controller
 
             $deletedCount = $query->delete();
 
+            // 🧠 Clear cache for this user/session so getAll() shows fresh data
+            $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+            Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
+
             return response()->json([
                 'success' => true,
                 'message' => 'Duplicated URLs removed successfully',
@@ -444,5 +482,86 @@ class UrlController extends Controller
                 'message' => 'Failed to remove duplicated URLs',
             ], 500);
         }
+    }
+    // In app/Http/Controllers/UrlController.php
+
+
+
+    public function updateFavourite(Request $request)
+    {
+        $session_id = $request->query('session_id');
+        $authUser = $request->user();
+        // basic validation for presence & id type; we'll coerce favourite manually
+        $request->validate([
+            'id' => 'required|integer',
+            'favourite' => 'required', // keep presence check; we'll coerce below
+        ]);
+
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $id = (int) $request->input('id');
+
+        // Coerce favourite into a boolean reliably (accepts "true","false","1","0", etc.)
+        $favRaw = $request->input('favourite');
+        $fav = filter_var($favRaw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+
+        if ($fav === null) {
+            return response()->json([
+                'message' => 'Invalid favourite value. Expect boolean true/false.'
+            ], 422);
+        }
+
+        // Find the user's URL entry
+        $url = Url::where('id', $id)
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (!$url) {
+            return response()->json(['message' => 'URL not found'], 404);
+        }
+
+        // Ensure we have tags as an array
+        $tags = [];
+        if (is_array($url->tags)) {
+            $tags = $url->tags;
+        } else {
+            $decoded = json_decode($url->tags, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $tags = $decoded;
+            } else {
+                $tags = [];
+            }
+        }
+
+        // IMPORTANT: Desired behavior:
+        // - if favourite === true  => REMOVE '#favourite'
+        // - if favourite === false => ADD '#favourite' (if missing)
+        if ($fav === true) {
+            // remove #favourite
+            if (!in_array('#favourite', $tags)) {
+                $tags[] = '#favourite';
+            }
+            $message = 'Added to favourites';
+        } else {
+            $tags = array_values(array_filter($tags, fn($t) => $t !== '#favourite'));
+            $message = 'Removed from favourites';
+            // add #favourite if missing
+
+        }
+        $cacheKeyPrefix = 'urls_' . ($authUser ? 'user_' . $authUser->id : 'session_' . $session_id);
+        Cache::forget($cacheKeyPrefix . '_status_all_tag_all');
+
+        // Save as real array — make sure Url model has `protected $casts = ['tags' => 'array'];`
+        $url->tags = $tags;
+        $url->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => $message,
+            'tags' => $tags,
+        ]);
     }
 }

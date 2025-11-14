@@ -34,5 +34,10 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+    'indexnow' => [
+        'key' => env('INDEXNOW_KEY'),
+        'host' => env('INDEXNOW_HOST'),
+    ],
+
 
 ];

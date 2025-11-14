@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Hash;
 use App\Models\User;
+use App\Models\UserTag;
 use Illuminate\Support\Facades\Auth;
 
 class OtpController extends Controller
@@ -173,8 +174,28 @@ class OtpController extends Controller
             $user->email_verified_at = now();
             $user->save();
         }
+        // ------------------ Option B: create default user tags ------------------
+        $defaultTags = ['Work', 'Research', 'Education', 'AI', 'Reading'];
+
+        $toInsert = [];
+        $now = now();
+
+        foreach ($defaultTags as $tag) {
+            $toInsert[] = [
+                'user_id' => $user->id,
+                'tag' => $tag,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        }
+
+        // Insert all 5 tags for the user
+        UserTag::insert($toInsert);
         // Log the user in using session-based auth (Sanctum SPA)
         Auth::login($user);
+        // Regenerate session ID to prevent fixation and ensure new cookie is sent
+        $request->session()->regenerate();
+
         $sessionId = request()->input('session_id');
         $urls = Url::where('session_id', $sessionId)->get();
         \Illuminate\Support\Facades\DB::transaction(function () use ($urls, $user) {

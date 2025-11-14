@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Mail\ForgotPasswordOtpMail;
 use App\Models\User;
 use Illuminate\Http\Request;
+use App\Models\UserTag;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -100,9 +102,34 @@ class UserController extends Controller
             $user->markEmailAsVerified();
         }
         // Step 3: Log the user in (creates session)
-        Auth::login($user);
+        // if request contains a 'remember' boolean, pass it to Auth::login()
+        Auth::login($user, $request->boolean('remember'));
+
         $request->session()->regenerate(); // important
         // Step 4: Regenerate session to prevent fixation attacks
+
+        // Ensure default user tags exist
+        try {
+            $hasTags = UserTag::where('user_id', $user->id)->exists();
+            if (! $hasTags) {
+                $defaultTags = ['Work', 'Research', 'Education', 'AI', 'Reading'];
+                $now = now();
+                $toInsert = array_map(function ($tag) use ($user, $now) {
+                    return [
+                        'user_id' => $user->id,
+                        'tag' => $tag,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
+                }, $defaultTags);
+                UserTag::insert($toInsert);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Default tags creation skipped', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         return response()->json([
             'success' => true,
@@ -111,67 +138,200 @@ class UserController extends Controller
         ]);
     }
 
-   
+
     public function fetchUser(Request $request)
     {
         $user = $request->user();
         return response()->json($user);
     }
+    public function updateName(Request $request)
+    {
+        // ✅ Validate incoming data
+        $validated = $request->validate([
+            'name' => 'required|string|min:2|max:50',
+        ]);
+
+        // ✅ Find user by ID
+        $ifuser = $request->user();
+        if (!$ifuser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not authenticated.',
+            ], 401);
+        }
+
+        // ✅ Get the user ID from the authenticated user
+        $id = $ifuser->id;
+
+        $user = User::find($id);
+
+        // Handle not found
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found',
+            ], 404);
+        }
+
+        // ✅ Update the name
+        $user->name = $validated['name'];
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User name updated successfully',
+            'user' => $user,
+        ], 200);
+    }
+
+    public function updateEmail(Request $request)
+    {
+        // ✅ Validate incoming data
+        $validated = $request->validate([
+            'email' => 'required|string|min:2|max:50',
+        ]);
+
+        // ✅ Find user by ID
+        $ifuser = $request->user();
+        if (!$ifuser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not authenticated.',
+            ], 401);
+        }
+
+        // ✅ Get the user ID from the authenticated user
+        $id = $ifuser->id;
+
+        $user = User::find($id);
+
+        // Handle not found
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found',
+            ], 404);
+        }
+
+        // ✅ Update the name
+        $user->email = $validated['email'];
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User name updated successfully',
+            'user' => $user,
+        ], 200);
+    }
     /**
      * Logout the authenticated user
      */
-public function logout(Request $request)
-{
-    try {
-        // Attempt to get user (may be null)
-        $user = $request->user();
-
-        // If bearer token present and user found — revoke
-        if ($request->bearerToken() && $user) {
-            $token = $user->currentAccessToken();
-            if ($token) $token->delete();
-        }
-
-        // Logout web guard if present
-        if (Auth::guard('web')->check()) {
-            Auth::guard('web')->logout();
-        } elseif (Auth::check()) {
-            Auth::logout();
-        }
-
-        // Invalidate session only if it exists
+    public function logout(Request $request)
+    {
         try {
-            if ($request->hasSession() && $request->session()) {
+            // Get user before logout
+            $user = $request->user();
+            $userId = $user ? $user->id : null;
+            $sessionId = $request->session()->getId();
+
+            // Revoke all Sanctum tokens for this user
+            if ($user) {
+                // Revoke current token if bearer token is present
+                if ($request->bearerToken()) {
+                    $token = $user->currentAccessToken();
+                    if ($token) {
+                        $token->delete();
+                    }
+                }
+
+                // Revoke ALL tokens for this user (optional - uncomment if you want to logout from all devices)
+                // PersonalAccessToken::where('tokenable_id', $userId)
+                //     ->where('tokenable_type', get_class($user))
+                //     ->delete();
+            }
+
+            // Delete session from database
+            if ($sessionId) {
+                DB::table('sessions')->where('id', $sessionId)->delete();
+            }
+
+            // Also delete all sessions for this user (optional - uncomment if you want to logout from all devices)
+            // if ($userId) {
+            //     DB::table('sessions')->where('user_id', $userId)->delete();
+            // }
+
+            // Logout from Auth guards
+            if (Auth::guard('web')->check()) {
+                Auth::guard('web')->logout();
+            } elseif (Auth::check()) {
+                Auth::logout();
+            }
+
+            // Invalidate and regenerate session
+            if ($request->hasSession()) {
                 $request->session()->invalidate();
                 $request->session()->regenerateToken();
             }
-        } catch (\Throwable $e) {
-            // ignore session issues
-        }
 
-        // Return success and clear cookies
-        $response = response()->json([
-            'success' => true,
-            'message' => 'Logged out successfully',
-            'user_id' => $user ? $user->id : null,
-        ], 200);
+            // Prepare response with cookie clearing
+            $response = response()->json([
+                'success' => true,
+                'message' => 'Logged out successfully',
+            ], 200);
 
-        $sessionCookieName = config('session.cookie'); // laravel_session
-        $cookiesToForget = [$sessionCookieName, 'XSRF-TOKEN'];
+            // Clear all session-related cookies
+            $sessionCookieName = config('session.cookie', 'laravel_session');
+            $cookiesToForget = [
+                $sessionCookieName,
+                'XSRF-TOKEN',
+                'laravel_session',
+            ];
 
-        foreach ($cookiesToForget as $cookieName) {
-            if ($cookieName) {
-                $response = $response->withCookie(cookie()->forget($cookieName));
+            foreach ($cookiesToForget as $cookieName) {
+                if ($cookieName) {
+                    // Create expired cookie to clear it
+                    $response = $response->withCookie(
+                        cookie(
+                            $cookieName,
+                            '',
+                            -2628000, // Expire in the past (1 month ago)
+                            '/',
+                            config('session.domain'),
+                            config('session.secure', false),
+                            true, // httpOnly
+                            false, // raw
+                            config('session.same_site', 'lax')
+                        )
+                    );
+                }
             }
-        }
 
-        return $response;
-    } catch (\Throwable $e) {
-        // Return success-ish to avoid leaking state; but also log server error if you want
-        \Log::warning('Logout issue: '.$e->getMessage());
-        return response()->json(['success' => true, 'message' => 'Logged out (with warnings)'], 200);
+            return $response;
+        } catch (\Throwable $e) {
+            Log::error('Logout error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            // Still try to clear cookies even on error
+            $response = response()->json([
+                'success' => true,
+                'message' => 'Logged out (with warnings)',
+            ], 200);
+
+            $sessionCookieName = config('session.cookie', 'laravel_session');
+            $cookiesToForget = [$sessionCookieName, 'XSRF-TOKEN', 'laravel_session'];
+
+            foreach ($cookiesToForget as $cookieName) {
+                if ($cookieName) {
+                    $response = $response->withCookie(
+                        cookie($cookieName, '', -2628000, '/', config('session.domain'), config('session.secure', false), true, false, config('session.same_site', 'lax'))
+                    );
+                }
+            }
+
+            return $response;
+        }
     }
-}
     public function sendForgotPasswordOtp(Request $request)
     {
         // ✅ Validate email only
@@ -294,91 +454,89 @@ public function logout(Request $request)
     }
 
     public function resetPassword(Request $request)
-{
-    // Validate input
-    $validator = Validator::make($request->all(), [
-        'reset_token' => 'required|string',
-        'new_password' => ['required'], // expects new_password_confirmation
-        // 'new_password' => ['required','string','min:8','max:72','confirmed'], // expects new_password_confirmation
-    ]);
-
-    if ($validator->fails()) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Validation failed',
-            'errors' => $validator->errors(),
-        ], 422);
-    }
-
-    $resetToken = $request->input('reset_token');
-    $cacheKey = "password_reset_token:{$resetToken}";
-    $payload = Cache::get($cacheKey);
-
-    if (! $payload || ! isset($payload['user_id'])) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid or expired reset token.',
-        ], 400);
-    }
-
-    $user = User::find($payload['user_id']);
-    if (! $user) {
-        // Defensive: clear token if orphaned
-        Cache::forget($cacheKey);
-        return response()->json([
-            'success' => false,
-            'message' => 'User not found for this reset token.',
-        ], 404);
-    }
-
-    $newPassword = $request->input('new_password');
-
-    try {
-        DB::transaction(function () use ($user, $newPassword, $cacheKey) {
-            // Update password (hashed)
-            $user->password = Hash::make($newPassword);
-
-            // Optionally update password changed timestamp
-            if (in_array('password_updated_at', array_keys($user->getAttributes()))) {
-                $user->password_updated_at = now();
-            }
-
-            // If you want to mark email verified here, do it outside reset flow
-            $user->save();
-
-            // Invalidate the reset token (single-use)
-            Cache::forget($cacheKey);
-
-            // OPTIONAL: revoke all Sanctum tokens (if using Sanctum)
-            if (class_exists(PersonalAccessToken::class)) {
-                PersonalAccessToken::where('tokenable_id', $user->id)
-                    ->where('tokenable_type', get_class($user))
-                    ->delete();
-            }
-
-            // OPTIONAL: revoke other sessions (if you track them)
-            // e.g. DB::table('sessions')->where('user_id', $user->id)->delete();
-        });
-
-    } catch (\Throwable $e) {
-        Log::error('resetPassword failed', [
-            'user_id' => $user->id ?? null,
-            'error' => $e->getMessage(),
+    {
+        // Validate input
+        $validator = Validator::make($request->all(), [
+            'reset_token' => 'required|string',
+            'new_password' => ['required'], // expects new_password_confirmation
+            // 'new_password' => ['required','string','min:8','max:72','confirmed'], // expects new_password_confirmation
         ]);
 
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $resetToken = $request->input('reset_token');
+        $cacheKey = "password_reset_token:{$resetToken}";
+        $payload = Cache::get($cacheKey);
+
+        if (! $payload || ! isset($payload['user_id'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid or expired reset token.',
+            ], 400);
+        }
+
+        $user = User::find($payload['user_id']);
+        if (! $user) {
+            // Defensive: clear token if orphaned
+            Cache::forget($cacheKey);
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found for this reset token.',
+            ], 404);
+        }
+
+        $newPassword = $request->input('new_password');
+
+        try {
+            DB::transaction(function () use ($user, $newPassword, $cacheKey) {
+                // Update password (hashed)
+                $user->password = Hash::make($newPassword);
+
+                // Optionally update password changed timestamp
+                if (in_array('password_updated_at', array_keys($user->getAttributes()))) {
+                    $user->password_updated_at = now();
+                }
+
+                // If you want to mark email verified here, do it outside reset flow
+                $user->save();
+
+                // Invalidate the reset token (single-use)
+                Cache::forget($cacheKey);
+
+                // OPTIONAL: revoke all Sanctum tokens (if using Sanctum)
+                if (class_exists(PersonalAccessToken::class)) {
+                    PersonalAccessToken::where('tokenable_id', $user->id)
+                        ->where('tokenable_type', get_class($user))
+                        ->delete();
+                }
+
+                // OPTIONAL: revoke other sessions (if you track them)
+                // e.g. DB::table('sessions')->where('user_id', $user->id)->delete();
+            });
+        } catch (\Throwable $e) {
+            Log::error('resetPassword failed', [
+                'user_id' => $user->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to reset password. Try again later.',
+            ], 500);
+        }
+
+        // OPTIONAL: send a confirmation email to the user about the password change
+        // Mail::to($user->email)->queue(new PasswordChangedNotification($user));
+
         return response()->json([
-            'success' => false,
-            'message' => 'Failed to reset password. Try again later.',
-        ], 500);
+            'success' => true,
+            'message' => 'Password reset successfully. Please sign in with your new password.',
+        ], 200);
     }
-
-    // OPTIONAL: send a confirmation email to the user about the password change
-    // Mail::to($user->email)->queue(new PasswordChangedNotification($user));
-
-    return response()->json([
-        'success' => true,
-        'message' => 'Password reset successfully. Please sign in with your new password.',
-    ], 200);
-}
-
 }
